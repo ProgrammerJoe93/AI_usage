@@ -1,0 +1,16 @@
+{
+    "KPlugin": {
+        "Authors": [
+            { "Name": "Joseph Russell" }
+        ],
+        "Category": "System Information",
+        "Description": "Shows AI (currently just Claude) subscription usage: current session and weekly limits",
+        "Icon": "utilities-system-monitor",
+        "Id": "com.joegineered.aiusage",
+        "License": "BSD-3-Clause",
+        "Name": "AI Usage",
+        "Version": "1.0"
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
