@@ -4,12 +4,12 @@
             { "Name": "Joseph Russell" }
         ],
         "Category": "System Information",
-        "Description": "Shows AI (currently just Claude) subscription usage: current session and weekly limits",
+        "Description": "Shows AI subscription usage limits for Claude, Codex, GitHub Copilot, Antigravity and OpenCode Go",
         "Icon": "utilities-system-monitor",
         "Id": "com.joegineered.aiusage",
         "License": "BSD-3-Clause",
         "Name": "AI Usage",
-        "Version": "1.0"
+        "Version": "2.0"
     },
     "KPackageStructure": "Plasma/Applet",
     "X-Plasma-API-Minimum-Version": "6.0"

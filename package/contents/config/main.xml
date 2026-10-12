@@ -15,5 +15,29 @@
         <entry name="showWeeklyInPanel" type="Bool">
             <default>true</default>
         </entry>
+        <entry name="enableClaude" type="Bool">
+            <label>Show Claude usage</label>
+            <default>true</default>
+        </entry>
+        <entry name="enableCodex" type="Bool">
+            <label>Show Codex usage</label>
+            <default>true</default>
+        </entry>
+        <entry name="enableCopilot" type="Bool">
+            <label>Show GitHub Copilot usage</label>
+            <default>true</default>
+        </entry>
+        <entry name="enableAntigravity" type="Bool">
+            <label>Show Antigravity usage</label>
+            <default>true</default>
+        </entry>
+        <entry name="enableOpenCode" type="Bool">
+            <label>Show OpenCode usage</label>
+            <default>true</default>
+        </entry>
+        <entry name="opencodeApiKey" type="String">
+            <label>OpenCode API key (empty = from opencode login or OPENCODE_API_KEY)</label>
+            <default></default>
+        </entry>
     </group>
 </kcfg>

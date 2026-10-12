@@ -1,99 +1,71 @@
 #!/usr/bin/env python3
-"""Fetch Claude subscription usage using the Claude Code OAuth login.
+"""Fetch AI subscription usage for Claude, Codex, Copilot, Antigravity and OpenCode.
 
-Reads the access token Claude Code stores after `claude` login (no API key
-needed) and queries the same endpoint Claude Code's /usage command uses.
-Always prints a single JSON object to stdout and exits 0.
+Each provider reuses the login the tool itself saved locally (no API keys
+to configure) and queries the same usage endpoint the tool uses. Tokens are
+never refreshed here, so the tools' own logins are left alone.
+
+Always prints a single JSON object to stdout and exits 0:
+  {"providers": [{"id", "name", "plan", "limits": [...], "error", "expired"}],
+   "fetchedAt": ms}
+Providers that aren't installed or logged in are left out.
 """
+import argparse
 import json
 import os
 import sys
-import time
-import urllib.error
-import urllib.request
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
-USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-LABELS = {
-    "five_hour": "Current session",
-    "seven_day": "Weekly (all models)",
-    "seven_day_opus": "Weekly (Opus)",
-    "seven_day_sonnet": "Weekly (Sonnet)",
+from providers import antigravity, claude, codex, copilot, opencode  # noqa: E402
+from providers.common import NotConfigured, ProviderError, now_ms  # noqa: E402
+
+PROVIDERS = {
+    "claude": claude,
+    "codex": codex,
+    "copilot": copilot,
+    "antigravity": antigravity,
+    "opencode": opencode,
 }
 
 
-def emit(obj):
-    print(json.dumps(obj))
-    sys.exit(0)
-
-
-def credentials_path():
-    if len(sys.argv) > 1 and sys.argv[1]:
-        return os.path.expanduser(sys.argv[1])
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-    return os.path.join(config_dir, ".credentials.json")
-
-
-def to_ms(iso):
-    if not iso:
-        return None
+def run(pid, opts):
+    module = PROVIDERS[pid]
+    result = {"id": pid, "name": module.NAME, "plan": None, "limits": [],
+              "error": None, "expired": False}
     try:
-        return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1000)
-    except ValueError:
-        return None
+        result.update(module.fetch(opts))
+    except NotConfigured as e:
+        if not opts["explicit"]:
+            return None
+        result["error"] = str(e)
+    except ProviderError as e:
+        result["error"] = str(e)
+        result["expired"] = e.expired
+    except Exception as e:  # keep one broken provider from hiding the others
+        result["error"] = f"{type(e).__name__}: {e}"
+    return result
 
 
 def main():
-    path = credentials_path()
-    try:
-        with open(path) as f:
-            oauth = json.load(f)["claudeAiOauth"]
-        token = oauth["accessToken"]
-    except FileNotFoundError:
-        emit({"error": f"No credentials at {path}. Log in with `claude` first."})
-    except (KeyError, ValueError) as e:
-        emit({"error": f"Could not read OAuth token from {path}: {e}"})
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--providers", default=",".join(PROVIDERS),
+                        help="comma-separated provider ids")
+    parser.add_argument("--explicit", action="store_true",
+                        help="report providers that aren't set up instead of hiding them")
+    parser.add_argument("--claude-credentials", default="")
+    args = parser.parse_args()
 
-    expires_at = oauth.get("expiresAt")
-    if expires_at and expires_at / 1000 < time.time():
-        emit({"error": "Login token expired. Run `claude` once to refresh it.", "expired": True})
+    opts = {
+        "explicit": args.explicit,
+        "claude_credentials": args.claude_credentials,
+    }
+    ids = [p for p in (s.strip() for s in args.providers.split(",")) if p in PROVIDERS]
+    with ThreadPoolExecutor(max_workers=max(1, len(ids))) as pool:
+        results = list(pool.map(lambda pid: run(pid, opts), ids))
 
-    req = urllib.request.Request(USAGE_URL, headers={
-        "Authorization": f"Bearer {token}",
-        "anthropic-beta": "oauth-2025-04-20",
-        "Accept": "application/json",
-        "User-Agent": "claude-usage-plasmoid/1.0",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.load(resp)
-    except urllib.error.HTTPError as e:
-        if e.code == 401:
-            emit({"error": "Token rejected (401). Run `claude` to re-authenticate.", "expired": True})
-        emit({"error": f"HTTP {e.code} from usage endpoint"})
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        emit({"error": f"Network error: {getattr(e, 'reason', e)}"})
-    except ValueError:
-        emit({"error": "Invalid JSON from usage endpoint"})
-
-    limits = []
-    for key, label in LABELS.items():
-        entry = data.get(key)
-        if not entry or entry.get("utilization") is None:
-            continue
-        limits.append({
-            "key": key,
-            "label": label,
-            "percent": float(entry["utilization"]),
-            "resetsAt": to_ms(entry.get("resets_at")),
-        })
-
-    emit({
-        "plan": oauth.get("subscriptionType"),
-        "limits": limits,
-        "fetchedAt": int(time.time() * 1000),
-    })
+    print(json.dumps({"providers": [r for r in results if r], "fetchedAt": now_ms()}))
 
 
 if __name__ == "__main__":

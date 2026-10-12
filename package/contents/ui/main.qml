@@ -9,8 +9,8 @@ import org.kde.kirigami as Kirigami
 PlasmoidItem {
     id: root
 
-    property var limits: []
-    property string plan: ""
+    // [{id, name, plan, limits: [{key, label, short, percent, resetsAt, detail}], error, expired}]
+    property var providers: []
     property string errorText: ""
     property bool loading: false
     property double fetchedAt: 0
@@ -18,14 +18,22 @@ PlasmoidItem {
 
     readonly property string scriptPath: decodeURIComponent(
         Qt.resolvedUrl("../code/fetch_usage.py").toString().replace(/^file:\/\//, ""))
-    readonly property var session: findLimit("five_hour")
-    readonly property var weekly: findLimit("seven_day")
+    readonly property var providerIds: ["claude", "codex", "copilot", "antigravity", "opencode"]
+    readonly property var panelTags: ({
+        claude: "CL", codex: "CX", copilot: "CP", antigravity: "AG", opencode: "OC"
+    })
+    readonly property var shownProviders: providers.filter(p => p.limits.length > 0)
+    readonly property bool hasProblem: errorText !== "" || providers.some(p => p.error)
+    readonly property double maxPrimary: shownProviders.reduce(
+        (m, p) => Math.max(m, p.limits[0].percent), 0)
 
-    function findLimit(key) {
-        for (let i = 0; i < limits.length; i++) {
-            if (limits[i].key === key) return limits[i];
-        }
-        return null;
+    function enabledProviders() {
+        const cfg = Plasmoid.configuration;
+        const flags = {
+            claude: cfg.enableClaude, codex: cfg.enableCodex, copilot: cfg.enableCopilot,
+            antigravity: cfg.enableAntigravity, opencode: cfg.enableOpenCode
+        };
+        return providerIds.filter(id => flags[id]);
     }
 
     function shellQuote(s) {
@@ -34,9 +42,19 @@ PlasmoidItem {
 
     function refresh() {
         if (loading) return;
+        const ids = enabledProviders();
+        if (!ids.length) {
+            providers = [];
+            errorText = i18n("No providers enabled. Turn some on in the widget settings.");
+            return;
+        }
         loading = true;
-        executable.connectSource("python3 " + shellQuote(scriptPath) + " "
-                                 + shellQuote(Plasmoid.configuration.credentialsPath));
+        // Pass the key through the environment so it doesn't show up in `ps`.
+        const apiKey = Plasmoid.configuration.opencodeApiKey;
+        executable.connectSource((apiKey ? "OPENCODE_API_KEY=" + shellQuote(apiKey) + " " : "")
+            + "python3 " + shellQuote(scriptPath)
+            + " --providers " + shellQuote(ids.join(","))
+            + " --claude-credentials " + shellQuote(Plasmoid.configuration.credentialsPath));
     }
 
     function handleOutput(stdout, stderr) {
@@ -48,15 +66,32 @@ PlasmoidItem {
             errorText = i18n("Helper failed: %1", (stderr || stdout || "no output").trim());
             return;
         }
-        if (result.error) {
-            errorText = result.error;
-            return;
-        }
         errorText = "";
-        limits = result.limits || [];
-        plan = result.plan || "";
+        // If a provider fails, keep showing its last good numbers next to the error.
+        const previous = {};
+        providers.forEach(p => previous[p.id] = p);
+        providers = (result.providers || []).map(p => {
+            if (p.error && !p.limits.length && previous[p.id]) {
+                p.limits = previous[p.id].limits;
+                p.plan = p.plan || previous[p.id].plan;
+                p.stale = true;
+            }
+            return p;
+        });
+        if (!providers.length) {
+            errorText = i18n("No logged-in AI tools found.");
+        }
         fetchedAt = result.fetchedAt || Date.now();
         now = Date.now();
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function planText(plan) {
+        if (!plan) return "";
+        return String(plan).charAt(0).toUpperCase() + String(plan).slice(1);
     }
 
     function colorFor(pct) {
@@ -85,20 +120,24 @@ PlasmoidItem {
     }
 
     Plasmoid.icon: "utilities-system-monitor"
-    Plasmoid.status: session && session.percent >= 90
+    Plasmoid.status: maxPrimary >= 90
                      ? PlasmaCore.Types.NeedsAttentionStatus
                      : PlasmaCore.Types.ActiveStatus
 
     toolTipMainText: i18n("AI Usage")
+    toolTipTextFormat: Text.RichText
     toolTipSubText: {
-        if (!limits.length) return errorText || i18n("Loading…");
-        const lines = limits.map(l => i18n("%1: %2%", l.label, Math.round(l.percent))
-                                      + " — " + resetText(l));
-        if (errorText) {
-            lines.push(i18n("Last updated %1 — %2",
-                            Qt.formatDateTime(new Date(fetchedAt), "hh:mm"), errorText));
-        }
-        return lines.join("\n");
+        if (!providers.length) return errorText || i18n("Loading…");
+        const lines = [];
+        providers.forEach(p => {
+            lines.push("<b>" + escapeHtml(p.name) + "</b>"
+                       + (p.plan ? " (" + escapeHtml(planText(p.plan)) + ")" : ""));
+            p.limits.forEach(l => lines.push(escapeHtml(
+                i18n("%1: %2%", l.label, Math.round(l.percent)) + " — " + resetText(l))));
+            if (p.error) lines.push(escapeHtml(p.error));
+        });
+        if (errorText) lines.push(escapeHtml(errorText));
+        return lines.join("<br>");
     }
 
     Plasmoid.contextualActions: [
@@ -172,62 +211,70 @@ PlasmoidItem {
             text: "100%"
         }
 
+        TextMetrics {
+            id: shortMetrics
+            font: Kirigami.Theme.smallFont
+            text: "g7d"
+        }
+
         RowLayout {
             id: compactRow
             anchors.centerIn: parent
-            spacing: Kirigami.Units.smallSpacing
+            spacing: Kirigami.Units.largeSpacing
 
             Kirigami.Icon {
-                visible: root.errorText !== ""
+                visible: root.hasProblem
                 source: "dialog-warning"
                 Layout.preferredWidth: Kirigami.Units.iconSizes.small
                 Layout.preferredHeight: Kirigami.Units.iconSizes.small
             }
 
             PlasmaComponents.Label {
-                visible: root.session === null && root.errorText === ""
+                visible: root.shownProviders.length === 0 && root.errorText === ""
                 text: "…"
             }
 
-            GridLayout {
-                visible: root.session !== null
-                opacity: root.errorText === "" ? 1 : 0.6
-                columns: 3
-                rowSpacing: 0
-                columnSpacing: Kirigami.Units.smallSpacing
+            Repeater {
+                model: root.shownProviders
+                delegate: RowLayout {
+                    required property var modelData
+                    spacing: Kirigami.Units.smallSpacing
+                    opacity: modelData.error ? 0.6 : 1
 
-                PlasmaComponents.Label {
-                    text: i18n("5h")
-                    font: Kirigami.Theme.smallFont
-                }
-                MiniBar {
-                    percent: root.session ? root.session.percent : 0
-                }
-                PlasmaComponents.Label {
-                    text: root.session ? i18n("%1%", Math.round(root.session.percent)) : ""
-                    font: Kirigami.Theme.smallFont
-                    color: root.session ? root.colorFor(root.session.percent) : Kirigami.Theme.textColor
-                    horizontalAlignment: Text.AlignRight
-                    Layout.minimumWidth: pctMetrics.advanceWidth
-                }
+                    PlasmaComponents.Label {
+                        visible: root.shownProviders.length > 1
+                        text: root.panelTags[modelData.id] || modelData.name
+                        font: Kirigami.Theme.smallFont
+                        opacity: 0.7
+                    }
 
-                PlasmaComponents.Label {
-                    visible: weeklyBar.visible
-                    text: i18n("7d")
-                    font: Kirigami.Theme.smallFont
-                }
-                MiniBar {
-                    id: weeklyBar
-                    visible: Plasmoid.configuration.showWeeklyInPanel && root.weekly !== null
-                    percent: root.weekly ? root.weekly.percent : 0
-                }
-                PlasmaComponents.Label {
-                    visible: weeklyBar.visible
-                    text: root.weekly ? i18n("%1%", Math.round(root.weekly.percent)) : ""
-                    font: Kirigami.Theme.smallFont
-                    color: root.weekly ? root.colorFor(root.weekly.percent) : Kirigami.Theme.textColor
-                    horizontalAlignment: Text.AlignRight
-                    Layout.minimumWidth: pctMetrics.advanceWidth
+                    ColumnLayout {
+                        spacing: 0
+                        Repeater {
+                            model: modelData.limits.slice(
+                                0, Plasmoid.configuration.showWeeklyInPanel ? 2 : 1)
+                            delegate: RowLayout {
+                                required property var modelData
+                                spacing: Kirigami.Units.smallSpacing
+
+                                PlasmaComponents.Label {
+                                    text: modelData.short
+                                    font: Kirigami.Theme.smallFont
+                                    Layout.minimumWidth: shortMetrics.advanceWidth
+                                }
+                                MiniBar {
+                                    percent: modelData.percent
+                                }
+                                PlasmaComponents.Label {
+                                    text: i18n("%1%", Math.round(modelData.percent))
+                                    font: Kirigami.Theme.smallFont
+                                    color: root.colorFor(modelData.percent)
+                                    horizontalAlignment: Text.AlignRight
+                                    Layout.minimumWidth: pctMetrics.advanceWidth
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -236,6 +283,8 @@ PlasmoidItem {
     fullRepresentation: ColumnLayout {
         Layout.minimumWidth: Kirigami.Units.gridUnit * 18
         Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+        Layout.preferredHeight: Math.min(Kirigami.Units.gridUnit * 32,
+                                         providerColumn.implicitHeight + Kirigami.Units.gridUnit * 5)
         spacing: Kirigami.Units.largeSpacing
 
         RowLayout {
@@ -244,11 +293,6 @@ PlasmoidItem {
                 level: 3
                 text: i18n("AI Usage")
                 Layout.fillWidth: true
-            }
-            PlasmaComponents.Label {
-                visible: root.plan !== ""
-                text: root.plan.charAt(0).toUpperCase() + root.plan.slice(1)
-                opacity: 0.6
             }
             PlasmaComponents.ToolButton {
                 icon.name: "view-refresh"
@@ -267,41 +311,95 @@ PlasmoidItem {
             Layout.fillWidth: true
         }
 
-        Repeater {
-            model: root.limits
-            delegate: ColumnLayout {
-                required property var modelData
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
+        PlasmaComponents.ScrollView {
+            id: scroll
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            PlasmaComponents.ScrollBar.horizontal.policy: PlasmaComponents.ScrollBar.AlwaysOff
+            contentWidth: availableWidth
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    PlasmaComponents.Label {
-                        text: modelData.label
-                        font.bold: true
+            ColumnLayout {
+                id: providerColumn
+                width: scroll.availableWidth
+                spacing: Kirigami.Units.largeSpacing * 2
+
+                Repeater {
+                    model: root.providers
+                    delegate: ColumnLayout {
+                        id: providerSection
+                        required property var modelData
+                        required property int index
                         Layout.fillWidth: true
+                        spacing: Kirigami.Units.largeSpacing
+
+                        Kirigami.Separator {
+                            visible: providerSection.index > 0
+                            Layout.fillWidth: true
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Kirigami.Heading {
+                                level: 4
+                                text: providerSection.modelData.name
+                                Layout.fillWidth: true
+                            }
+                            PlasmaComponents.Label {
+                                visible: !!providerSection.modelData.plan
+                                text: root.planText(providerSection.modelData.plan)
+                                opacity: 0.6
+                            }
+                        }
+
+                        PlasmaComponents.Label {
+                            visible: !!providerSection.modelData.error
+                            text: providerSection.modelData.error || ""
+                            color: Kirigami.Theme.negativeTextColor
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+
+                        Repeater {
+                            model: providerSection.modelData.limits
+                            delegate: ColumnLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
+                                opacity: providerSection.modelData.stale ? 0.6 : 1
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    PlasmaComponents.Label {
+                                        text: modelData.label
+                                        font.bold: true
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    PlasmaComponents.Label {
+                                        text: i18n("%1% used", Math.round(modelData.percent))
+                                        color: root.colorFor(modelData.percent)
+                                    }
+                                }
+                                PlasmaComponents.ProgressBar {
+                                    from: 0
+                                    to: 100
+                                    value: Math.min(100, modelData.percent)
+                                    Layout.fillWidth: true
+                                }
+                                PlasmaComponents.Label {
+                                    text: modelData.detail
+                                          ? modelData.detail + " · " + root.resetText(modelData)
+                                          : root.resetText(modelData)
+                                    font: Kirigami.Theme.smallFont
+                                    opacity: 0.7
+                                    wrapMode: Text.Wrap
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
                     }
-                    PlasmaComponents.Label {
-                        text: i18n("%1% used", Math.round(modelData.percent))
-                        color: root.colorFor(modelData.percent)
-                    }
-                }
-                PlasmaComponents.ProgressBar {
-                    from: 0
-                    to: 100
-                    value: Math.min(100, modelData.percent)
-                    Layout.fillWidth: true
-                }
-                PlasmaComponents.Label {
-                    text: root.resetText(modelData)
-                    font: Kirigami.Theme.smallFont
-                    opacity: 0.7
                 }
             }
-        }
-
-        Item {
-            Layout.fillHeight: true
         }
 
         PlasmaComponents.Label {
